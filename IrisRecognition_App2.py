@@ -1,0 +1,736 @@
+import tkinter as tk
+from tkinter import filedialog, Menu
+from PIL import Image, ImageTk, ImageDraw
+import numpy as np
+import os
+from scipy.ndimage import binary_closing, binary_opening
+from scipy.ndimage import generate_binary_structure, iterate_structure
+from scipy.ndimage import label
+from scipy.ndimage import gaussian_filter1d, map_coordinates
+
+
+class IrisRecognitionApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Iris Recognition App")
+
+        self.main_canvas = tk.Canvas(self.root)
+        self.scrollbar = tk.Scrollbar(self.root, orient="vertical", command=self.main_canvas.yview)
+        self.scrollable_frame = tk.Frame(self.main_canvas)
+
+        self.scrollable_frame.bind(
+            "<Configure>",
+            lambda e: self.main_canvas.configure(
+                scrollregion=self.main_canvas.bbox("all")
+            )
+        )
+
+        self.main_canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
+        self.main_canvas.configure(yscrollcommand=self.scrollbar.set)
+
+        self.main_canvas.pack(side="left", fill="both", expand=True)
+        self.scrollbar.pack(side="right", fill="y")
+
+        self.root.geometry("1270x600+0+20")
+
+        self.display_width = 300
+        self.display_height = 200
+
+        self.img = None
+        self.img_original = None
+        self.img_tk = None
+        self.canvas_original = None
+
+        # PUPIL
+        self.pupil_img_tk = None
+        self.canvas_pupil = None
+        self.canvas_pupil_cleaned = None
+        self.pupil_cleaned_img_tk = None
+        self.canvas_pupil_largest_blob = None
+        self.pupil_largest_blob_img_tk = None
+        self.canvas_pupil_detected = None
+        self.pupil_detected_img_tk = None
+
+        self.xp_value_default = tk.DoubleVar(value=5.0)
+        self.open_strength_pupil = tk.IntVar(value=1)
+        self.close_strength_pupil = tk.IntVar(value=2)
+
+        self.pupil_center = None
+        self.pupil_radius = None
+
+        # IRIS
+        self.iris_img_tk = None
+        self.canvas_iris = None
+        self.canvas_iris_cleaned = None
+        self.iris_cleaned_img_tk = None
+        self.canvas_iris_largest_blob = None
+        self.iris_largest_blob_img_tk = None
+        self.canvas_iris_detected = None
+        self.iris_detected_img_tk = None
+
+        self.xi_value_default = tk.DoubleVar(value=2.5)
+        self.open_strength_iris = tk.IntVar(value=2)
+        self.close_strength_iris = tk.IntVar(value=3)
+
+        self.iris_radius = None
+
+        self.canvas_iris_drawn = None
+        self.canvas_unwrapped = None
+        self.unwrapped_img_tk = None
+        self.iris_drawn_tk = None
+
+        self.setup_ui()
+
+        self.main_canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+
+    def setup_ui(self):
+        top_button_frame = tk.Frame(self.scrollable_frame)
+        top_button_frame.pack(anchor="nw", pady=10, padx=10)
+
+        load_button = tk.Button(top_button_frame, text="Load image", command=self.load_image)
+        load_button.pack(side="left")
+
+        self.canvas_original = tk.Canvas(self.scrollable_frame, width=self.display_width, height=self.display_height,
+                                         bg="gray")
+        self.canvas_original.pack(pady=10)
+
+
+        # PUPIL
+        title_label = tk.Label(self.scrollable_frame, text="Pupil detection", font=("Arial", 14))
+        title_label.pack(pady=5)
+
+        checkbox_frame = tk.Frame(self.scrollable_frame)
+        checkbox_frame.pack(pady=5)
+        self.param_mode = tk.StringVar(value="none")
+
+        tk.Radiobutton(checkbox_frame, text="Select parameters manually",
+                       variable=self.param_mode, value="custom", command=self.toggle_custom_option).pack(side=tk.LEFT,
+                                                                                                         padx=5)
+
+        tk.Radiobutton(checkbox_frame, text="Default parameters",
+                       variable=self.param_mode, value="default", command=self.toggle_custom_option).pack(side=tk.LEFT,
+                                                                                                          padx=5)
+
+        option_frame = tk.Frame(self.scrollable_frame)
+        option_frame.pack(pady=5)
+        self.slider_frame = tk.Frame(option_frame)
+        tk.Label(self.slider_frame, text="Binarization sensitivity factor:").pack(side=tk.LEFT, padx=5)
+        self.slider = tk.Scale(self.slider_frame, from_=1.0, to=10.0, resolution=0.1, orient=tk.HORIZONTAL,
+                               variable=self.xp_value_default)
+        self.slider.pack(side=tk.LEFT, padx=(5, 25))
+
+
+        tk.Label(self.slider_frame, text="Filter strength:").pack(side=tk.LEFT, padx=5)
+        tk.Label(self.slider_frame, text="Opening").pack(side=tk.LEFT, padx=5)
+        self.open_entry = tk.Entry(self.slider_frame, width=3, textvariable=self.open_strength_pupil)
+        self.open_entry.pack(side=tk.LEFT)
+
+        tk.Label(self.slider_frame, text="Closing").pack(side=tk.LEFT, padx=5)
+        self.close_entry = tk.Entry(self.slider_frame, width=3, textvariable=self.close_strength_pupil)
+        self.close_entry.pack(side=tk.LEFT, padx=(5, 25))
+
+        tk.Label(self.slider_frame, text="Pupil center detection method:").pack(side=tk.LEFT, padx=5)
+        self.center_method = tk.StringVar(value="projection")
+
+        tk.Radiobutton(self.slider_frame, text="Centroid", variable=self.center_method, value="centroid").pack(side=tk.LEFT)
+        tk.Radiobutton(self.slider_frame, text="Projection", variable=self.center_method, value="projection").pack(side=tk.LEFT, padx=(5, 25))
+
+        self.apply_button = tk.Button(self.slider_frame, text="Apply", command=self.detect_pupil)
+        self.apply_button.pack(side=tk.LEFT, padx=10)
+
+        image_frame = tk.Frame(self.scrollable_frame)
+        image_frame.pack(pady=(10, 40))
+
+        def add_labeled_canvas(parent, label_text):
+            frame = tk.Frame(parent)
+            label = tk.Label(frame, text=label_text, font=("Arial", 10, "bold"))
+            label.pack()
+            canvas = tk.Canvas(frame, width=self.display_width, height=self.display_height, bg="gray")
+            canvas.pack()
+            frame.pack(side=tk.LEFT, padx=5)
+            return canvas
+
+        self.canvas_pupil = add_labeled_canvas(image_frame, "Binary pupil")
+        self.canvas_pupil_cleaned = add_labeled_canvas(image_frame, "After cleaning")
+        self.canvas_pupil_largest_blob = add_labeled_canvas(image_frame, "Largest blob")
+        self.canvas_pupil_detected = add_labeled_canvas(image_frame, "Detected pupil")
+
+        # IRIS
+        title_label_iris = tk.Label(self.scrollable_frame, text="Iris detection", font=("Arial", 14))
+        title_label_iris.pack(pady=5)
+
+        option_frame_iris = tk.Frame(self.scrollable_frame)
+        option_frame_iris.pack(pady=5)
+        self.slider_frame_iris = tk.Frame(option_frame_iris)
+        tk.Label(self.slider_frame_iris, text="Binarization sensitivity factor:").pack(side=tk.LEFT, padx=5)
+        self.slider_iris = tk.Scale(self.slider_frame_iris, from_=0.1, to=5.0, resolution=0.05, orient=tk.HORIZONTAL,
+                               variable=self.xi_value_default)
+        self.slider_iris.pack(side=tk.LEFT, padx=(5, 25))
+
+        tk.Label(self.slider_frame_iris, text="Filter strength:").pack(side=tk.LEFT, padx=5)
+        tk.Label(self.slider_frame_iris, text="Opening").pack(side=tk.LEFT, padx=5)
+        self.open_entry_iris = tk.Entry(self.slider_frame_iris, width=3, textvariable=self.open_strength_iris)
+        self.open_entry_iris.pack(side=tk.LEFT)
+
+        tk.Label(self.slider_frame_iris, text="Closing").pack(side=tk.LEFT, padx=5)
+        self.close_entry_iris = tk.Entry(self.slider_frame_iris, width=3, textvariable=self.close_strength_iris)
+        self.close_entry_iris.pack(side=tk.LEFT, padx=(5, 25))
+
+        self.apply_button_iris = tk.Button(self.slider_frame_iris, text="Apply", command=self.detect_iris)
+        self.apply_button_iris.pack(side=tk.LEFT, padx=10)
+
+        image_frame_iris = tk.Frame(self.scrollable_frame)
+        image_frame_iris.pack(pady=(10, 40))
+
+        self.canvas_iris = add_labeled_canvas(image_frame_iris, "Binary iris")
+        self.canvas_iris_cleaned = add_labeled_canvas(image_frame_iris, "After cleaning")
+        self.canvas_iris_largest_blob = add_labeled_canvas(image_frame_iris, "Largest blob")
+        self.canvas_iris_detected = add_labeled_canvas(image_frame_iris, "Detected iris")
+
+        # IRIS UNWRAPPING
+        title_label_unwrap = tk.Label(self.scrollable_frame, text="Iris unwrapping", font=("Arial", 14))
+        title_label_unwrap.pack(pady=5)
+
+        unwrap_frame = tk.Frame(self.scrollable_frame)
+        unwrap_frame.pack(pady=5)
+
+        self.unwrap_button = tk.Button(unwrap_frame, text="Unwrap iris", command=self.unwrap_iris)
+        self.unwrap_button.pack(side=tk.LEFT, padx=10)
+
+        image_frame_unwrap = tk.Frame(self.scrollable_frame)
+        image_frame_unwrap.pack(pady=(10, 40))
+
+        def add_unwrap_canvas(parent):
+            frame = tk.Frame(parent)
+            canvas = tk.Canvas(frame, width=self.display_width, height=self.display_height, bg="gray")
+            canvas.pack()
+            frame.pack(side=tk.LEFT, padx=5)
+            return canvas
+
+        self.canvas_iris_drawn = add_unwrap_canvas(image_frame_unwrap)
+        self.canvas_unwrapped = add_unwrap_canvas(image_frame_unwrap)
+
+    def toggle_custom_option(self):
+        mode = self.param_mode.get()
+        if mode == "custom":
+            self.center_method.set("projection")
+            self.slider_frame.pack(pady=5)
+            self.slider_frame_iris.pack(pady=5)
+        elif mode == "default":
+            self.slider_frame.pack_forget()
+            self.slider_frame_iris.pack_forget()
+            self.xp_value_default.set(5.0)
+            self.xi_value_default.set(2.5)
+            self.open_strength_pupil.set(1)
+            self.close_strength_pupil.set(2)
+            self.detect_pupil()
+            self.detect_iris()
+
+    def load_image(self):
+        filepath = filedialog.askopenfilename(
+            initialdir="data",
+            title="Select Image",
+            filetypes=[("JPG files", "*.jpg")]
+        )
+        if filepath:
+            canvases = [
+                self.canvas_pupil, self.canvas_pupil_cleaned,
+                self.canvas_pupil_largest_blob, self.canvas_pupil_detected,
+                self.canvas_iris, self.canvas_iris_cleaned,
+                self.canvas_iris_largest_blob, self.canvas_iris_detected
+            ]
+            for canvas in canvases:
+                if canvas:
+                    canvas.delete("all")
+
+            self.pupil_img_tk = None
+            self.pupil_cleaned_img_tk = None
+            self.pupil_largest_blob_img_tk = None
+            self.pupil_detected_img_tk = None
+
+            self.iris_img_tk = None
+            self.iris_cleaned_img_tk = None
+            self.iris_largest_blob_img_tk = None
+            self.iris_detected_img_tk = None
+
+            self.pupil_center = None
+            self.pupil_radius = None
+            self.largest_pupil = None
+
+            self.unwrapped_img_tk = None
+            self.iris_drawn_tk = None
+
+            self.img_original = Image.open(filepath)
+            self.img = self.img_original.resize((self.display_width, self.display_height), Image.Resampling.LANCZOS)
+            self.img_tk = ImageTk.PhotoImage(self.img)
+
+            self.canvas_original.delete("all")
+            self.canvas_original.create_image(0, 0, anchor=tk.NW, image=self.img_tk)
+            self.canvas_original.image = self.img_tk
+
+    def _on_mousewheel(self, event):
+        self.main_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    """ ŹRENICA """
+    def detect_pupil(self):
+        if self.img_original is None:
+            return
+
+        X_P = self.xp_value_default.get()
+        img_resized = self.img_original.resize((self.display_width, self.display_height))
+
+        # Step 1 – Binary pupil
+        binary_pupil = self.pupil_detect_binary(img_resized, X_P)
+        binary_img = Image.fromarray(binary_pupil)
+        self.pupil_img_tk = ImageTk.PhotoImage(binary_img)
+        self.canvas_pupil.delete("all")
+        self.canvas_pupil.create_image(0, 0, anchor=tk.NW, image=self.pupil_img_tk)
+        self.canvas_pupil.image = self.pupil_img_tk
+
+        # Step 2 – Cleaned pupil image
+        cleaned_pupil = self.pupil_morphologically_clean(binary_pupil)
+        cleaned_img = Image.fromarray(cleaned_pupil)
+        self.pupil_cleaned_img_tk = ImageTk.PhotoImage(cleaned_img)
+        self.canvas_pupil_cleaned.delete("all")
+        self.canvas_pupil_cleaned.create_image(0, 0, anchor=tk.NW, image=self.pupil_cleaned_img_tk)
+        self.canvas_pupil_cleaned.image = self.pupil_cleaned_img_tk
+
+        # Step 3 – Largest blob from cleaned image
+        largest_pupil = self.pupil_get_largest_blob(cleaned_pupil)
+        blob_img = Image.fromarray(largest_pupil)
+        self.blob_img_tk = ImageTk.PhotoImage(blob_img)
+        self.canvas_pupil_largest_blob.delete("all")
+        self.canvas_pupil_largest_blob.create_image(0, 0, anchor=tk.NW, image=self.blob_img_tk)
+        self.canvas_pupil_largest_blob.image = self.blob_img_tk
+
+        # Step 4 – Circle on original
+        self.pupil_draw_detected(img_resized, largest_pupil)
+
+    def pupil_detect_binary(self, image, X_P):
+        img_np = np.array(image)
+        gray_np = np.dot(img_np[..., :3], [0.299, 0.587, 0.114]).astype(np.uint8)
+        P = np.mean(gray_np)
+        P_P = P / X_P
+        binary_pupil = np.where(gray_np < P_P, 255, 0).astype(np.uint8)
+        return binary_pupil
+
+    def erosion(self, binary_img, structure):
+        pad_h, pad_w = structure.shape[0] // 2, structure.shape[1] // 2
+        padded_img = np.pad(binary_img, ((pad_h, pad_h), (pad_w, pad_w)), mode='constant', constant_values=0)
+        result = np.zeros_like(binary_img)
+
+        for i in range(binary_img.shape[0]):
+            for j in range(binary_img.shape[1]):
+                region = padded_img[i:i + structure.shape[0], j:j + structure.shape[1]]
+                if np.array_equal(region[structure == 1], np.ones(np.sum(structure))):
+                    result[i, j] = 1
+        return result
+    def dilation(self, binary_img, structure):
+        pad_h, pad_w = structure.shape[0] // 2, structure.shape[1] // 2
+        padded_img = np.pad(binary_img, ((pad_h, pad_h), (pad_w, pad_w)), mode='constant', constant_values=0)
+        result = np.zeros_like(binary_img)
+
+        for i in range(binary_img.shape[0]):
+            for j in range(binary_img.shape[1]):
+                region = padded_img[i:i + structure.shape[0], j:j + structure.shape[1]]
+                if np.any(region[structure == 1]):
+                    result[i, j] = 1
+        return result
+
+    def pupil_morphologically_clean(self, binary_pupil):
+        binary_bool = (binary_pupil > 0).astype(int)
+        structure = np.array([[0, 1, 0],
+                              [1, 1, 1],
+                              [0, 1, 0]], dtype=int)
+
+        open_size = self.open_strength_pupil.get()
+        close_size = self.close_strength_pupil.get()
+
+        opened = binary_bool.copy()
+        for _ in range(open_size):
+            opened = self.erosion(opened, structure)
+        for _ in range(open_size):
+            opened = self.dilation(opened, structure)
+
+        closed = opened.copy()
+        for _ in range(close_size):
+            closed = self.dilation(closed, structure)
+        for _ in range(close_size):
+            closed = self.erosion(closed, structure)
+
+        return (closed * 255).astype(np.uint8)
+
+    def pupil_morphologically_clean2(self, binary_pupil):
+        binary_bool = binary_pupil.astype(bool)
+        structure = generate_binary_structure(2, 1)
+        open_size = self.open_strength_pupil.get()
+        close_size = self.close_strength_pupil.get()
+
+        structure_open = iterate_structure(structure, open_size)
+        structure_close = iterate_structure(structure, close_size)
+
+        cleaned = binary_opening(binary_bool, structure=structure_open)
+        cleaned = binary_closing(cleaned, structure=structure_close)
+
+        return (cleaned * 255).astype(np.uint8)
+
+    def pupil_get_largest_blob(self, binary_img):
+        labeled_array, num_features = label(binary_img)
+        if num_features == 0:
+            return binary_img
+
+        sizes = [(labeled_array == i).sum() for i in range(1, num_features + 1)]
+        max_label = np.argmax(sizes) + 1
+        largest_pupil = (labeled_array == max_label).astype(np.uint8) * 255
+        return largest_pupil
+
+    def get_horizontal_projection(self, binary):
+        return np.sum(binary, axis=1)
+
+    def get_vertical_projection(self, binary):
+        return np.sum(binary, axis=0)
+
+    def get_diagonal_projection_45(self, binary):
+        return np.array([np.sum(np.diagonal(binary, offset=o)) for o in range(-binary.shape[0] + 1, binary.shape[1])])
+
+    def get_diagonal_projection_135(self, binary):
+        flipped = np.flipud(binary)
+        return np.array(
+            [np.sum(np.diagonal(flipped, offset=o)) for o in range(-flipped.shape[0] + 1, flipped.shape[1])])
+
+    def get_pupil_center_by_projections(self, binary_pupil):
+        vertical_proj = self.get_vertical_projection(binary_pupil)
+        horizontal_proj = self.get_horizontal_projection(binary_pupil)
+        diag45 = self.get_diagonal_projection_45(binary_pupil)
+        diag135 = self.get_diagonal_projection_135(binary_pupil)
+
+        projections = {
+            "vertical": (np.max(vertical_proj), int(np.argmax(vertical_proj))),
+            "horizontal": (np.max(horizontal_proj), int(np.argmax(horizontal_proj))),
+            "diag45": (np.max(diag45), int(np.argmax(diag45))),
+            "diag135": (np.max(diag135), int(np.argmax(diag135)))
+        }
+        sorted_projections = sorted(projections.items(), key=lambda x: x[1][0], reverse=True)
+
+        (first_name, (first_value, first_idx)) = sorted_projections[0]
+        (second_name, (second_value, second_idx)) = sorted_projections[1]
+
+        def index_to_xy(proj_name, idx):
+            if proj_name == "vertical":
+                return idx, None  # X znany
+            elif proj_name == "horizontal":
+                return None, idx  # Y znany
+            elif proj_name == "diag45":
+                x = (binary_pupil.shape[1] + idx) // 2
+                y = (binary_pupil.shape[0] - 1 - idx) // 2
+                return x, y
+            elif proj_name == "diag135":
+                x = (binary_pupil.shape[1] + idx) // 2
+                y = (binary_pupil.shape[0] + idx) // 2
+                return x, y
+
+        first_x, first_y = index_to_xy(first_name, first_idx)
+        second_x, second_y = index_to_xy(second_name, second_idx)
+
+        center_x = first_x if first_x is not None else second_x
+        center_y = first_y if first_y is not None else second_y
+
+        return int(center_x), int(center_y)
+
+    def pupil_draw_detected(self, img_resized, binary_pupil):
+        # vertical_proj = np.sum(binary_pupil, axis=0)
+        # horizontal_proj = np.sum(binary_pupil, axis=1)
+
+        if self.center_method.get() == "projection":
+            # center_x = int(np.argmax(vertical_proj))
+            # center_y = int(np.argmax(horizontal_proj))
+            center_x, center_y = self.get_pupil_center_by_projections(binary_pupil)
+        else:
+            coords = np.column_stack(np.where(binary_pupil == 255))
+            if coords.size > 0:
+                center_y, center_x = coords.mean(axis=0)
+            else:
+                center_x = center_y = 0
+
+        coords = np.column_stack(np.where(binary_pupil == 255))
+        if coords.size > 0:
+            radius = np.max(np.linalg.norm(coords - [center_y, center_x], axis=1))
+        else:
+            radius = 0
+
+        self.pupil_center = (center_x, center_y)
+        self.pupil_radius = radius
+
+        marked_img = img_resized.copy()
+        draw = ImageDraw.Draw(marked_img)
+        draw.ellipse(
+            [(center_x - radius, center_y - radius), (center_x + radius, center_y + radius)],
+            outline="red", width=2
+        )
+
+        self.pupil_detected_img_tk = ImageTk.PhotoImage(marked_img)
+        self.canvas_pupil_detected.delete("all")
+        self.canvas_pupil_detected.create_image(0, 0, anchor=tk.NW, image=self.pupil_detected_img_tk)
+        self.canvas_pupil_detected.image = self.pupil_detected_img_tk
+
+    """ TĘCZÓWKA """
+    def detect_iris(self):
+        if self.img_original is None:
+            return
+
+        X_I = self.xi_value_default.get()
+        img_resized = self.img_original.resize((self.display_width, self.display_height))
+
+        # Step 1 – Binary iris
+        binary_iris = self.iris_detect_binary(img_resized, X_I)
+        binary_img = Image.fromarray(binary_iris)
+        self.iris_img_tk = ImageTk.PhotoImage(binary_img)
+        self.canvas_iris.delete("all")
+        self.canvas_iris.create_image(0, 0, anchor=tk.NW, image=self.iris_img_tk)
+        self.canvas_iris.image = self.iris_img_tk
+
+        # Step 2 – Cleaned iris image
+        cleaned_iris = self.iris_morphologically_clean(binary_iris)
+        cleaned_img = Image.fromarray(cleaned_iris)
+        self.iris_cleaned_img_tk = ImageTk.PhotoImage(cleaned_img)
+        self.canvas_iris_cleaned.delete("all")
+        self.canvas_iris_cleaned.create_image(0, 0, anchor=tk.NW, image=self.iris_cleaned_img_tk)
+        self.canvas_iris_cleaned.image = self.iris_cleaned_img_tk
+
+        # Step 3 – Best blob from cleaned image
+        largest_iris = self.iris_get_largest_blob(cleaned_iris, self.pupil_center, self.pupil_radius)
+        blob_img = Image.fromarray(largest_iris)
+        self.iris_largest_blob_img_tk = ImageTk.PhotoImage(blob_img)
+        self.canvas_iris_largest_blob.delete("all")
+        self.canvas_iris_largest_blob.create_image(0, 0, anchor=tk.NW, image=self.iris_largest_blob_img_tk)
+        self.canvas_iris_largest_blob.image = self.iris_largest_blob_img_tk
+
+        # Step 4 – Circle on original
+        self.iris_draw_detected(img_resized, largest_iris)
+
+    def iris_detect_binary(self, image, X_I):
+        img_np = np.array(image)
+        gray_np = np.dot(img_np[..., :3], [0.299, 0.587, 0.114]).astype(np.uint8)
+        P = np.mean(gray_np)
+        P_I = P / X_I
+        binary_pupil = np.where(gray_np < P_I, 255, 0).astype(np.uint8)
+        return binary_pupil
+
+    def iris_detect_binary(self, image, X_I):
+        img_np = np.array(image)
+        gray_np = np.dot(img_np[..., :3], [0.299, 0.587, 0.114]).astype(np.uint8)
+
+        P = np.mean(gray_np)
+        P_I = P / X_I
+
+        binary_iris = np.where(gray_np < P_I, 255, 0).astype(np.uint8)
+
+        if self.pupil_center is not None and self.pupil_radius is not None:
+            center_x, center_y = self.pupil_center
+            rr, cc = np.ogrid[:binary_iris.shape[0], :binary_iris.shape[1]]
+            distance = np.sqrt((cc - center_x) ** 2 + (rr - center_y) ** 2)
+
+            binary_iris[distance <= self.pupil_radius] = 0
+
+            max_iris_radius = 2.5 * self.pupil_radius
+            binary_iris[distance >= max_iris_radius] = 0
+
+        return binary_iris
+
+    def iris_morphologically_clean(self, binary_iris):
+        binary_bool = (binary_iris > 0).astype(int)
+        structure = np.array([[0, 1, 0],
+                              [1, 1, 1],
+                              [0, 1, 0]], dtype=int)
+
+        open_size = self.open_strength_iris.get()
+        close_size = self.close_strength_iris.get()
+
+        opened = binary_bool.copy()
+        for _ in range(open_size):
+            opened = self.erosion(opened, structure)
+        for _ in range(open_size):
+            opened = self.dilation(opened, structure)
+
+        closed = opened.copy()
+        for _ in range(close_size):
+            closed = self.dilation(closed, structure)
+        for _ in range(close_size):
+            closed = self.erosion(closed, structure)
+
+        return (closed * 255).astype(np.uint8)
+
+    def iris_morphologically_clean2(self, binary_iris):
+        binary_bool = binary_iris.astype(bool)
+        structure = generate_binary_structure(2, 1)
+
+        open_size = 2
+        close_size = 3
+
+        structure_open = iterate_structure(structure, open_size)
+        structure_close = iterate_structure(structure, close_size)
+
+        cleaned = binary_opening(binary_bool, structure=structure_open)
+        cleaned = binary_closing(cleaned, structure=structure_close)
+
+        return (cleaned * 255).astype(np.uint8)
+
+    def iris_get_largest_blob(self, binary_iris, pupil_center, pupil_radius):
+        labeled_array, num_features = label(binary_iris)
+        if num_features == 0:
+            return binary_iris
+
+        max_radius = 0
+        selected_blob = np.zeros_like(binary_iris)
+
+        for label_idx in range(1, num_features + 1):
+            mask = (labeled_array == label_idx)
+            coords = np.column_stack(np.where(mask))
+
+            if coords.size == 0:
+                continue
+
+            center_y, center_x = coords.mean(axis=0)
+            radius = np.max(np.linalg.norm(coords - [center_y, center_x], axis=1))
+            distance_to_pupil = np.linalg.norm([center_x - pupil_center[0], center_y - pupil_center[1]])
+
+            # Warunki: bliskość środka źrenicy i odpowiedni rozmiar
+            if distance_to_pupil < pupil_radius * 0.5 and radius > pupil_radius * 1.3:
+                if radius > max_radius:
+                    max_radius = radius
+                    selected_blob = mask
+
+        return selected_blob.astype(np.uint8) * 255
+
+    def estimate_iris_radius_by_radial_projection(self, binary_iris, center, num_angles=360, min_consecutive_zeros=3):
+        center_x, center_y = center
+        binary_iris = binary_iris.astype(bool)
+
+        height, width = binary_iris.shape
+        angles = np.linspace(0, 2 * np.pi, num=num_angles, endpoint=False)
+
+        radii = []
+
+        for angle in angles:
+            consecutive_zeros = 0
+            for r in range(int(self.pupil_radius) + 1, int(2.5 * self.pupil_radius)):
+                x = int(center_x + r * np.cos(angle))
+                y = int(center_y + r * np.sin(angle))
+
+                if x < 0 or x >= width or y < 0 or y >= height:
+                    break
+
+                if not binary_iris[y, x]:  # wykryto pierwszy czarny piksel = koniec tęczówki
+                    consecutive_zeros += 1
+                    if consecutive_zeros >= min_consecutive_zeros:
+                        estimated_radius = r - min_consecutive_zeros // 2
+                        radii.append(estimated_radius)
+                        break
+                else:
+                    consecutive_zeros = 0
+
+        if radii:
+            return np.median(radii)
+        else:
+            return 0
+
+    def iris_draw_detected(self, img_resized, binary_iris):
+        if self.pupil_center is None:
+            return
+
+        center_x, center_y = self.pupil_center
+        coords = np.column_stack(np.where(binary_iris == 255))
+        if coords.size > 0:
+            radius = self.estimate_iris_radius_by_radial_projection(binary_iris, self.pupil_center)
+        else:
+            radius = 0
+
+        self.iris_radius = radius
+
+        marked_img = img_resized.copy()
+        draw = ImageDraw.Draw(marked_img)
+        draw.ellipse(
+            [(center_x - radius, center_y - radius), (center_x + radius, center_y + radius)],
+            outline="blue", width=2
+        )
+
+        self.iris_detected_img_tk = ImageTk.PhotoImage(marked_img)
+        self.canvas_iris_detected.delete("all")
+        self.canvas_iris_detected.create_image(0, 0, anchor=tk.NW, image=self.iris_detected_img_tk)
+        self.canvas_iris_detected.image = self.iris_detected_img_tk
+
+    def unwrap_iris(self):
+        if self.img_original is None or self.pupil_center is None or self.iris_radius is None:
+            return
+
+        pupil_x, pupil_y = self.pupil_center
+        pupil_r = self.pupil_radius
+        iris_r = self.iris_radius
+
+        img_resized = self.img_original.resize((self.display_width, self.display_height))
+        img_np = np.array(img_resized)
+
+        num_radial_samples = 64
+        num_angular_samples = 256
+
+        theta = np.linspace(0, 2 * np.pi, num_angular_samples, endpoint=False)
+        r = np.linspace(pupil_r, iris_r, num_radial_samples)
+        r_grid, theta_grid = np.meshgrid(r, theta)
+
+        x = pupil_x + r_grid.T * np.cos(theta_grid.T)
+        y = pupil_y + r_grid.T * np.sin(theta_grid.T)
+
+        unwrapped_channels = []
+        for c in range(3):
+            channel = img_np[..., c]
+            coords = np.array([y.flatten(), x.flatten()])
+            unwrapped = map_coordinates(channel, coords, order=1, mode='reflect').reshape(
+                (num_radial_samples, num_angular_samples))
+            unwrapped_channels.append(unwrapped)
+
+        unwrapped_rgb = np.stack(unwrapped_channels, axis=2).astype(np.uint8)
+        unwrapped_img = Image.fromarray(unwrapped_rgb)
+
+        # Update canvas to match image size
+        self.canvas_unwrapped.config(width=num_angular_samples, height=num_radial_samples)
+        self.unwrapped_img_tk = ImageTk.PhotoImage(unwrapped_img)
+        self.canvas_unwrapped.delete("all")
+        self.canvas_unwrapped.create_image(0, 0, anchor=tk.NW, image=self.unwrapped_img_tk)
+        self.canvas_unwrapped.image = self.unwrapped_img_tk
+
+        # Original image with overlaid circles
+        draw_img = img_resized.copy()
+        draw = ImageDraw.Draw(draw_img)
+        draw.ellipse(
+            [(pupil_x - pupil_r, pupil_y - pupil_r), (pupil_x + pupil_r, pupil_y + pupil_r)],
+            outline="red", width=2
+        )
+        draw.ellipse(
+            [(pupil_x - iris_r, pupil_y - iris_r), (pupil_x + iris_r, pupil_y + iris_r)],
+            outline="blue", width=2
+        )
+
+        self.iris_drawn_tk = ImageTk.PhotoImage(draw_img)
+        self.canvas_iris_drawn.delete("all")
+        self.canvas_iris_drawn.create_image(0, 0, anchor=tk.NW, image=self.iris_drawn_tk)
+        self.canvas_iris_drawn.image = self.iris_drawn_tk
+
+
+if __name__ == '__main__':
+    root = tk.Tk()
+    app = IrisRecognitionApp(root)
+    root.mainloop()
+
+
+"""
+Przypadki gdzie wykrywanie źrenicy na pewno działa (przy opcji "centroid" bo te projekcje mi beznadziejnie działają):
+- 76, 1, X_p=3.6, 1,2
+- 41, 2, X_p=3.4, 3,3
+- 34, 1, X_p=3.9
+
+Dobre przypadki dla wykrywania tęczówki:
+- 76, 1, X_i=1.3, 2,3
+- 41, 2, X_i=0.9, 1,2
+- 34, 1, X_i=0.9, 1,2
+
+"""
