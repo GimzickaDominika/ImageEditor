@@ -983,6 +983,8 @@ if __name__ == '__main__':
 
 
 """
+--- Przykłady użycia dla zbioru tęczówek pobranego ze strony 'pages' ---
+
 Dobre przypadki dla wykrywania źrenicy (przy opcji "centroid"):
 - 76, 1, X_p=3.6, 1, 2
 - 41, 2, X_p=3.4, 3, 3
@@ -993,6 +995,6 @@ Dobre przypadki dla wykrywania tęczówki:
 - 41, 2, X_i=0.9, 1, 2
 - 34, 1, X_i=0.9, 1, 2
 
-Numery powyżej to:
+Numery powyżej to odpowiednio:
 - numer folderu, numer zdjęcia, X_p lub X_i, liczba iteracji otwarcia, liczba iteracji zamknięcia
 """
