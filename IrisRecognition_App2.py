@@ -904,9 +904,15 @@ class IrisRecognitionApp:
         self.canvas_iris_detected.image = self.iris_detected_img_tk
 
     def unwrap_iris(self):
+        """
+        Rozwija wykrytą tęczówkę do prostokąta, wyświetla rozwinięcie na jednej kanwie oraz oryginalny obraz
+        oka na drugiej, z naniesionymi okręgami wyznaczającymi granice źrenicy i tęczówki na podstawie wcześniejszych
+        wyników detekcji.
+        """
         if self.img_original is None or self.pupil_center is None or self.iris_radius is None:
             return
 
+        # Pobranie wyznaczonych współrzędnych środka źrenicy, jej promienia i promienia tęczówki
         pupil_x, pupil_y = self.pupil_center
         pupil_r = self.pupil_radius
         iris_r = self.iris_radius
@@ -914,33 +920,44 @@ class IrisRecognitionApp:
         img_resized = self.img_original.resize((self.display_width, self.display_height))
         img_np = np.array(img_resized)
 
+        # Ustalenie liczby próbek w kierunku promieniowym (od źrenicy do tęczówki) i kątowym (pełen obrót wokół środka)
         num_radial_samples = 64
         num_angular_samples = 384
 
+        # Generowanie równomiernych próbek kątów (0 do 2π) - dookoła źrenicy
         theta = np.linspace(0, 2 * np.pi, num_angular_samples, endpoint=False)
+        # Generowanie równomiernych próbek promienia (od źrenicy do tęczówki)
         r = np.linspace(pupil_r, iris_r, num_radial_samples)
+        # Tworzenie siatki współrzędnych promienia i kąta
         r_grid, theta_grid = np.meshgrid(r, theta)
 
+        # Obliczenie współrzędnych X i Y na obrazie dla każdej pary (r, theta)
         x = pupil_x + r_grid.T * np.cos(theta_grid.T)
         y = pupil_y + r_grid.T * np.sin(theta_grid.T)
 
-        unwrapped_channels = []
+        unwrapped_channels = []  # Lista na rozwinięte kanały RGB
+
+        # Iteracja przez każdy kanał (R, G, B)
         for c in range(3):
-            channel = img_np[..., c]
-            coords = np.array([y.flatten(), x.flatten()])
+            channel = img_np[..., c]  # Wyodrębnienie kanału
+            coords = np.array([y.flatten(), x.flatten()])  # Spłaszczenie współrzędnych
+            # Interpolacja wartości pikseli w nowych współrzędnych
             unwrapped = map_coordinates(channel, coords, order=1, mode='reflect').reshape(
                 (num_radial_samples, num_angular_samples))
-            unwrapped_channels.append(unwrapped)
+            unwrapped_channels.append(unwrapped)  # Dodanie rozwiniętego kanału do listy
 
+        # Połączenie trzech rozwiniętych kanałów w obraz RGB
         unwrapped_rgb = np.stack(unwrapped_channels, axis=2).astype(np.uint8)
         unwrapped_img = Image.fromarray(unwrapped_rgb)
 
+        # Wyświetlanie otrzymanego rozwinięcia tęczówki na kanwie
         self.canvas_unwrapped.config(width=num_angular_samples, height=num_radial_samples)
         self.unwrapped_img_tk = ImageTk.PhotoImage(unwrapped_img)
         self.canvas_unwrapped.delete("all")
         self.canvas_unwrapped.create_image(0, 0, anchor=tk.NW, image=self.unwrapped_img_tk)
         self.canvas_unwrapped.image = self.unwrapped_img_tk
 
+        # Naniesienie okręgów wyznaczających tęczówkę na oryginalny obraz oka
         draw_img = img_resized.copy()
         draw = ImageDraw.Draw(draw_img)
         draw.ellipse(
@@ -952,6 +969,7 @@ class IrisRecognitionApp:
             outline="blue", width=2
         )
 
+        # Wyświetlenie obrazu z naniesionymi okręgami na drugiej kanwie w sekcji 'Iris Unwrapping'
         self.iris_drawn_tk = ImageTk.PhotoImage(draw_img)
         self.canvas_iris_drawn.delete("all")
         self.canvas_iris_drawn.create_image(0, 0, anchor=tk.NW, image=self.iris_drawn_tk)
